@@ -57,6 +57,7 @@ type Props = {
   homepageData: any,
   homepageMeme: ?{ text: string, url: string },
   homepageCustomBanners: Array<CustomBanners>,
+  prefsReady: boolean,
   homepageFetched: boolean,
   doFetchAllActiveLivestreamsForQuery: () => void,
   doFetchItemsInCollection: (params: { collectionId: string, pageSize?: number }) => Promise<any>,
@@ -68,7 +69,7 @@ type Props = {
   activeLivestreamByCreatorId: LivestreamByCreatorId,
   livestreamViewersById: LivestreamViewersById,
   getActiveLivestreamUrisForIds: (Array<string>) => Array<string>,
-  watchLaterCount: ?number,
+  watchLaterRawCount: ?number,
   watchLaterUris: ?Array<string>,
 };
 
@@ -81,6 +82,7 @@ function HomePage(props: Props) {
     homepageData,
     homepageMeme,
     homepageCustomBanners,
+    prefsReady,
     homepageFetched,
     doFetchAllActiveLivestreamsForQuery,
     doFetchItemsInCollection,
@@ -89,7 +91,7 @@ function HomePage(props: Props) {
     doOpenModal,
     activeLivestreamByCreatorId: al, // yup, unreadable name, but we are just relaying here.
     livestreamViewersById: lv,
-    watchLaterCount,
+    watchLaterRawCount,
     watchLaterUris,
   } = props;
 
@@ -132,8 +134,15 @@ function HomePage(props: Props) {
     subscribedChannelIds,
   ]);
 
-  const showWatchLaterSectionRef = React.useRef((watchLaterCount || 0) > 0);
-  const showWatchLaterSection = showWatchLaterSectionRef.current;
+  const showWatchLaterSectionRef = React.useRef();
+  if (showWatchLaterSectionRef.current === undefined) {
+    if ((watchLaterRawCount || 0) > 0) {
+      showWatchLaterSectionRef.current = true;
+    } else if (prefsReady) {
+      showWatchLaterSectionRef.current = false;
+    }
+  }
+  const showWatchLaterSection = showWatchLaterSectionRef.current === true;
   const visibleSortedRowData: Array<RowDataItem> = React.useMemo(
     () => sortedRowData.filter((row: RowDataItem) => row.id !== 'WATCH_LATER' || showWatchLaterSection),
     [showWatchLaterSection, sortedRowData]
@@ -175,6 +184,7 @@ function HomePage(props: Props) {
     () => sortedRowData.some((row: RowDataItem) => row.id === 'WATCH_LATER'),
     [sortedRowData]
   );
+  const hasFetchedWatchLaterItemsRef = React.useRef(false);
 
   type SectionHeaderProps = {
     title: string,
@@ -329,10 +339,11 @@ function HomePage(props: Props) {
   }, []);
 
   React.useEffect(() => {
-    if (authenticated && hasWatchLaterSection && watchLaterUris === undefined) {
+    if (authenticated && hasWatchLaterSection && !hasFetchedWatchLaterItemsRef.current) {
+      hasFetchedWatchLaterItemsRef.current = true;
       doFetchItemsInCollection({ collectionId: COLLECTIONS.WATCH_LATER_ID });
     }
-  }, [authenticated, doFetchItemsInCollection, hasWatchLaterSection, watchLaterUris]);
+  }, [authenticated, doFetchItemsInCollection, hasWatchLaterSection]);
 
   return (
     <Page className="homePage-wrapper" fullWidthPage>

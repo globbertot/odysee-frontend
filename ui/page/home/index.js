@@ -18,8 +18,9 @@ import {
   selectHomepageMeme,
   selectHomepageCustomBanners,
 } from 'redux/selectors/settings';
-import { selectCountForCollectionIdNonDeleted, selectUrlsForCollectionIdNonDeleted } from 'redux/selectors/collections';
+import { selectCountForCollectionId, selectUrlsForCollectionIdNonDeleted } from 'redux/selectors/collections';
 import { doFetchItemsInCollection } from 'redux/actions/collections';
+import { selectPrefsReady } from 'redux/selectors/sync';
 
 import HomePage from './view';
 
@@ -37,7 +38,8 @@ const select = (state) => ({
   activeLivestreamByCreatorId: selectActiveLivestreamByCreatorId(state),
   livestreamViewersById: selectViewersById(state),
   homepageCustomBanners: selectHomepageCustomBanners(state),
-  watchLaterCount: selectCountForCollectionIdNonDeleted(state, COLLECTIONS.WATCH_LATER_ID),
+  prefsReady: selectPrefsReady(state),
+  watchLaterRawCount: selectCountForCollectionId(state, COLLECTIONS.WATCH_LATER_ID),
   watchLaterUris: selectUrlsForCollectionIdNonDeleted(state, COLLECTIONS.WATCH_LATER_ID),
 });
 
