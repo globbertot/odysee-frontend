@@ -141,6 +141,10 @@ Used in frontend and clients:
 - Recsys telemetry: `https://recsys.odysee.tv/v1/lvv`
 - Recsys FYP: `https://recsys.odysee.tv/v1/u`
 - Livestream API: `https://api.odysee.live`
+  - `POST /livestream/is_live`
+  - `POST /livestream/all`
+  - `GET /replays/list` (signed query)
+  - `GET /streams/kill?app=live&...` (signed query)
 - Player CDN: `https://player.odycdn.com`
 - Thumbnails CDN: `https://thumbnails.odycdn.com/optimize/`
 - Socket server: `wss://sockety.odysee.tv/ws`
@@ -295,6 +299,8 @@ From `ui/redux/actions/websocket.js`:
 
 Nuance:
 - Protected-content comment sockets may transform claim-id for URL routing.
+- `viewers` socket messages update `livestream.viewersById` by claim id.
+- `livestream` socket messages trigger a fresh per-channel `is_live` lookup.
 
 ## 6.8 Search and Recommendations
 
@@ -331,8 +337,99 @@ Recommendation telemetry path:
 
 ## 6.9 Livestream Integration
 
-- API wrapper in `ui/livestream.js`: `${LIVESTREAM_SERVER_API}/{resource}/{action}`.
-- Active livestream reconciliation in `ui/redux/actions/livestream.js` uses `claim_search` with `has_no_source: true`.
+### Transport contract (`ui/livestream.js`)
+- Base URL: `${LIVESTREAM_SERVER_API}` (default `https://api.odysee.live`).
+- Path shape: `${LIVESTREAM_SERVER_API}/{resource}/{action}`.
+- Default method: `POST` with `Content-Type: application/x-www-form-urlencoded`.
+- `GET` mode is also supported for query-driven calls.
+- Object params are JSON-stringified before query/body encoding.
+- Wrapper expects JSON responses containing top-level `data`, and returns `response.data`.
+
+### Live status endpoints used by web client
+From `ui/redux/actions/livestream.js`:
+- `POST /livestream/is_live`
+  - Params: `channel_claim_id`.
+  - Used by `doFetchChannelIsLiveForId`.
+- `POST /livestream/all`
+  - Used by `doFetchAllActiveLivestreamsForQuery`.
+
+Client-side request guards:
+- Prevent duplicate `is_live` requests for the same channel while one is in flight.
+- Prevent duplicate `all` requests for the same serialized query while one is in flight.
+
+### Active livestream reconciliation (API + SDK)
+`doFetchAllActiveLivestreamsForQuery` performs a two-step merge:
+1. Fetch active livestreams from `api.odysee.live` (`/livestream/all`).
+2. Normalize by channel id via `transformNewLivestreamData`.
+3. Resolve/filter against SDK claims using `claim_search` with:
+   - `has_no_source: true`
+   - `claim_type: ["stream"]`
+   - `claim_ids` from active livestream payload
+   - optional `any_languages`
+4. Keep only channels whose active claim survives current query filters.
+
+### Polling and throttling behavior
+- Global active-stream fetch throttle:
+  - `FETCH_ACTIVE_LIVESTREAMS_MIN_INTERVAL_MS = 5 * 60 * 1000`.
+- Skip logic inside throttle window:
+  - Skip after success (`failCount === 0`).
+  - Skip after repeated failures (`failCount >= 3`).
+- Per-channel status polling (`withLiveStatus`):
+  - Default interval: `45s`
+  - Faster interval: `15s`
+- Polling is skipped when livestream websocket is connected for the claim context.
+
+### Replay listing used by publish/update flows
+Used by:
+- `ui/component/publish/livestream/livestreamForm/view.jsx`
+- `ui/component/publish/upload/publishFile/view.jsx`
+
+Endpoint:
+- `GET /replays/list`
+
+Required signed query params:
+- `channel_claim_id`
+- `channel_name` (URL-encoded)
+- `signature`
+- `signature_ts`
+
+Signing source:
+- `Lbry.channel_sign` over hex-encoded channel name (`toHex(channelName)`).
+
+Frontend filtering/parsing:
+- Accept replay rows where `Status` is `inprogress` or `ready`.
+- Convert `Duration` from nanoseconds to seconds for display.
+
+### Stream reset endpoint
+Used by `killStream` (`ui/util/livestream.js`) and reset UI (`ui/component/claimPreviewReset/view.jsx`):
+- `GET /streams/kill?app=live&channel_claim_id=...&channel_name=...&signature_ts=...&signature=...`
+- Signature generation uses `Lbry.channel_sign` over hex-encoded channel name.
+- Frontend expects JSON with truthy `data`.
+
+### Ingest URLs exposed in setup UI
+From `ui/constants/livestream.js`:
+- `LIVESTREAM_RTMP_URL=rtmp://stream.odysee.com/live`
+- `NEW_LIVESTREAM_RTMP_URL=rtmp://publish.odysee.live/live`
+
+Current setup page uses `LIVESTREAM_RTMP_URL` when presenting stream server/key instructions.
+
+### Live playback binding
+- For no-source claims, `selectStreamingUrlForUri` returns `activeLivestreamForChannel.videoUrl`.
+- Video player uses that URL as HLS source for live playback.
+- For protected livestreams, player calls SDK `get` with:
+  - `uri` = active livestream URI
+  - `base_streaming_url` = active livestream `videoUrl`
+  - `environment`
+  - then uses returned `streaming_url`.
+
+### Response shape expected by frontend
+From `flow-typed/livestream.js`:
+- `LivestreamIsLiveResponse` fields:
+  - `Live`, `Start`, `VideoURL`, `ThumbnailURL`, `ViewerCount`, `ChannelClaimID`
+  - `ActiveClaim` (`ClaimID`, `CanonicalURL`, `ReleaseTime`, `Protected`)
+  - `PastClaims`, `FutureClaims`
+- `ReplayListResponse` fields:
+  - `Status`, `PercentComplete`, `URL`, `ThumbnailURLs`, `Duration`, `Created`
 
 ## 6.10 Playback URL Logic
 
@@ -500,6 +597,9 @@ The Odysee Internal APIs repository includes these main endpoint families:
 
 ### Livestream support
 - `/live_stream/new`, `/live_stream/viewers`, `/live_stream/viewers_by_channel`
+
+Runtime note:
+- Web client livestream status/replay/reset flows are primarily driven by `https://api.odysee.live` endpoints documented in section `6.9`.
 
 ### Memberships
 - `/membership/*`, `/membership_v2/*`
@@ -912,6 +1012,43 @@ Interpretation in web client:
 - `200`: done (success or SDK error payload)
 - `404`: missing query
 
+### 12.4 Livestream status (`api.odysee.live`)
+
+```http
+POST /livestream/is_live
+Content-Type: application/x-www-form-urlencoded
+
+channel_claim_id=<channelClaimId>
+```
+
+```http
+POST /livestream/all
+Content-Type: application/x-www-form-urlencoded
+```
+
+Notes:
+- Responses are expected to contain top-level `data`.
+- `all` returns an array of active-status entries; `is_live` returns a single status object.
+
+### 12.5 Livestream replay list (`api.odysee.live`)
+
+```http
+GET /replays/list?channel_claim_id=<id>&channel_name=<urlEncodedName>&signature=<sig>&signature_ts=<ts>
+```
+
+Response parsing in frontend:
+- Expects `json.data` array of replay rows.
+- Uses `Status` to include only `inprogress` / `ready` rows in replay picker.
+
+### 12.6 Livestream kill/reset (`api.odysee.live`)
+
+```http
+GET /streams/kill?app=live&channel_claim_id=<id>&channel_name=<urlEncodedName>&signature_ts=<ts>&signature=<sig>
+```
+
+Response parsing in frontend:
+- Expects truthy `json.data`; otherwise treated as failure.
+
 ---
 
 ## 13. Reliability and Edge Cases
@@ -961,9 +1098,18 @@ Before shipping new integration code:
 - `ui/redux/actions/websocket.js`
 - `ui/redux/actions/livestream.js`
 - `ui/livestream.js`
+- `ui/constants/livestream.js`
+- `ui/util/livestream.js`
+- `ui/hocs/withLiveStatus/view.jsx`
+- `ui/redux/selectors/livestream.js`
+- `ui/redux/selectors/file_info.js`
+- `ui/component/viewers/videoViewer/internal/videojs.jsx`
+- `ui/component/publish/livestream/livestreamForm/view.jsx`
+- `ui/component/publish/upload/publishFile/view.jsx`
 - `ui/reducers.js`
 - `ui/constants/pages.js`
 - `ui/util/lbryURI.js`
+- `flow-typed/livestream.js`
 - `config.js`
 - `.env.defaults`
 
